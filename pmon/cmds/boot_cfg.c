@@ -72,8 +72,7 @@
 
 #include "boot_cfg.h"
 
-Menu_Item menu_items[MAXARGS];//Storage All menu information.
-int menus_num = 0;
+Menu_Item *menus;//Storage All menu information.
 MenuOptions menu_options[] = {
 	{"showmenu", 0, 0, "1"}, //indentfy to show or not show menu for user.
 	{"default", 0, 0, "0"}, //default menu to boot.
@@ -251,7 +250,37 @@ int split_str(const char * str,char * strings[2])
 		strcpy (strings[0], str);
 	return 1;
 }
+//split string by char
+int split_bychar(const char * str, const char c, char * strings[2])
+{
+	char * p;
 
+	//check input data buf.
+	if( !str || !strings)
+		return -1 ;
+	if( !strings[0] || !strings [1] )
+		return -1;
+
+	//Remove SPACE or TAB from header and tail.
+	p = trim(str);
+	//if is empty line or comment data.
+	if( *p == '\0' || *p == '#')
+		return -1;
+	if (*p == c)
+		++p;
+	//found where is the SPACE or TAB.
+	p = index (str, c);
+
+	if( p )// if found copy data.
+	{
+		strncpy (strings[0], str, p - str);
+		strcpy (strings[1], p+1);
+		return 2;
+	}
+	else
+		strcpy (strings[0], str);
+	return 1;
+}
 /*********************************************************************
  * Split string to key and value.
  * char * str, string to be splited
@@ -259,15 +288,16 @@ int split_str(const char * str,char * strings[2])
  * int option_len, length of the buffer option.
  * char * value, buffer to stor value.
  * int value_len, length of the buffer value.
- * return -1 for failed, 0 for success.
+ * return -1 for failed, 0 for success, 1 for grub
 *********************************************************************/
 
 int GetOption (char *str, char *option, int option_len, char *value,
-					  int val_len)
+					  int val_len, char *other)
 {
 	char *argv[2];
 	char key [MENU_TITLE_BUF_LEN +1] = {0};
 	char val [VALUE_LEN +1] = {0};
+	char val_added [VALUE_LEN +1] = {0};
 	char *p;
 	int argc;
 
@@ -281,18 +311,64 @@ int GetOption (char *str, char *option, int option_len, char *value,
 	//if split to two part, return 2.
 	if( argc < 2 )
 		return -1;
+	if (argc == 2) {
+		//remove SPACE and TAB from key and val header and tail.
+		p = trim (key);
+		if( strcasecmp (p, "set") == 0 ) {
+			p = trim(val);
+			remove_comment(p);
+			argc = split_bychar(p, '=', argv);
+			if (argc == 2) {
+				p = trim (key);
+				strncpy (option, p, option_len - 1);
+				if (strcasecmp(p, "root") == 0) {
+					p = trim (val);
+					memset(key, 0, MENU_TITLE_BUF_LEN);
+					while (*p) {
+						if (*p >= '0' && *p <= '9') {
+							if (*(p+1) == ',') {
+								sprintf(key, "/dev/sd%c", (9 - ('9' - *p)) + 'a');
+								sprintf(val_added, "wd%d", *p - '0');
+							} else {
+								sprintf(val, "%s%c", key, *p);
+								sprintf(other, "%s%c", val_added, (8 - ('9' - *p)) + 'a');
+							}
+						}
+						++p;
+					}
+					strncpy (value, val, val_len -1);
+					return 1;
+				}
+			}
+		}
+		//copy to buffer.
+		strncpy (option, p, option_len - 1);
 
-	//remove SPACE and TAB from key and val header and tail.
-	p = trim (key);
-	//copy to buffer.
-	strncpy (option, p, option_len - 1);
+		p = trim (val);
+		//remove comment data from string.
+		remove_comment(p);
+		argc = split_str(p, argv);
+		if (argc < 1)
+			return -1;
+		if (argc == 1) {
+			strncpy (value, p, val_len -1);
+			return 0;
+		} else {
+			//remove SPACE and TAB from key and val header and tail.
+			p = trim (key);
+			remove_comment(p);
+			//copy to buffer.
+			strncpy (value, p, val_len -1);
+			//args...
+			p = trim (val);
+			remove_comment(p);
+			strncpy (other, p, val_len -1);
 
-	p = trim (val);
-	//remove comment data from string.
-	remove_comment(p);
-	strncpy (value, p, val_len -1);
+			return 1;
+		}
+	}
 
-	return 0;
+	return -1;
 }
 
 /******************************************************************
@@ -345,8 +421,104 @@ int GetTitle(const char *str,char * title, int title_buf_len)
 			strncpy (title, p, title_buf_len);
 			return 0;
 		}
+		//deal with grub.cfg
+		if( strcasecmp (p, "menuentry") == 0 )
+		{
+			//remove SPACE and TAB from begin and end of string.
+			p = trim (value);
+			//Parse string.
+			argv[0] = index(p, '\'');
+			p = argv[0] + 1;
+			argv[1] = index(p, '\'');
+			strncpy(title, p, argv[1] - p);
+			return 0;
+		}
+		//deal with submenu in grub.cfg
+		if( strcasecmp (p, "submenu") == 0 )
+		{
+			//remove SPACE and TAB from begin and end of string.
+			p = trim (value);
+			//Parse string.
+			argv[0] = index(p, '\'');
+			p = argv[0] + 1;
+			argv[1] = index(p, '\'');
+			strncpy(title, p, argv[1] - p);
+			return 1;
+		}
 	}
 	return -1;
+}
+
+void assign_menu(char *cp, char *option, char *value, char *other, Menu_Item *menu, char *root_prefix)
+{
+	int n = 0;
+	DeviceDisk *d;
+	//Read all properties of current menu item.
+	if( GetOption (cp,option,OPTION_LEN,value,VALUE_LEN, other) == 0 )
+	{
+		if( strcasecmp (option,"kernel") == 0 || strcasecmp (option,"linux") == 0 ) // got kernel property
+		{
+			if( menu->kernel != NULL && menu->kernel[0] == '\0') // we only sotr the firs kernel property, drop others.
+				strncpy(menu->kernel,value,VALUE_LEN);
+		}
+		else if( strcasecmp (option,"args") == 0 )// got kernel arguments property.
+		{
+			if( menu->args != NULL && menu->args[0] == '\0')//same as the kernel property.
+				strncpy(menu->args,value,VALUE_LEN);
+		}
+		else if( strcasecmp (option,"initrd") == 0 )// go initrd kernel arguments property, may be null.
+		{
+			memset(option, 0, OPTION_LEN);
+			sprintf(option, "%s%s", root_prefix, value);
+			if( menu->initrd!= NULL && menu->initrd[0] == '\0')// same as the kernel property.
+				strncpy(menu->initrd, option, VALUE_LEN);
+		}
+		else if (strcasecmp(option, "root") == 0)
+		{
+			if (menu->root != NULL && menu->root[0] == '\0')
+			{
+				strncpy(menu->root, value, VALUE_LEN);
+			}
+		}
+	} else if (GetOption (cp,option,OPTION_LEN,value,VALUE_LEN, other) == 1) {
+		if( strcasecmp (option,"kernel") == 0 || strcasecmp (option,"linux") == 0 ) // got kernel property
+		{
+			if( menu->kernel != NULL && menu->kernel[0] == '\0') // we only sotr the firs kernel property, drop others.
+			{
+				memset(option, 0, OPTION_LEN);
+				sprintf(option, "%s%s", root_prefix, value);
+				strncpy(menu->kernel, option, VALUE_LEN);
+			}
+			if( menu->args != NULL && menu->args[0] == '\0')//same as the kernel property.
+			{
+				strncpy(menu->args, other, VALUE_LEN);
+			}
+		}
+		else if (strcasecmp(option, "root") == 0)
+		{
+			strncpy(root_prefix, other, VALUE_LEN);
+			n = root_prefix[strlen(root_prefix)-1] - 'a';
+			d = FindDevice(root_prefix);
+			if (d == NULL) {
+				return (-1);
+			}
+			sprintf(root_prefix, "/dev/fs/%s@%s", d->part[n]->fs->fsname, other);
+			if (menu->root != NULL && menu->root[0] == '\0')
+			{
+				strncpy(menu->root, value, VALUE_LEN);
+			}
+		}
+	}
+}
+
+void set_menuitem(Menu_Item * menu)
+{
+	memset (menu->kernel, 0, VALUE_LEN + 1);
+	memset (menu->args, 0, VALUE_LEN + 1);
+	memset (menu->initrd, 0, VALUE_LEN + 1);
+	memset (menu->root, 0, VALUE_LEN + 1);
+	menu->Next = NULL;
+	menu->Sub = NULL;
 }
 
 /*************************************************************************
@@ -355,7 +527,8 @@ int GetTitle(const char *str,char * title, int title_buf_len)
 
 int menu_list_read(ExecId id, int fd, int flags)
 {
-	int j;//index for current menu item.
+	int menus_num = 0;
+	int i, j;//index for current menu item.
 	char buf[1025];
 	char buf_bak[1025];
 	int buflen = 1024;
@@ -363,22 +536,28 @@ int menu_list_read(ExecId id, int fd, int flags)
 	char* cp = NULL;
 	char option[OPTION_LEN] = {0};
 	char value[VALUE_LEN] = {0};
+	char other[VALUE_LEN] = {0};
+	char root_prefix[VALUE_LEN] = {0};
 	int in_menu = 0;
+	int issubmenu = 0;
 	char title [MENU_TITLE_BUF_LEN + 1];//Title of menu item, display on screen.
+	DeviceDisk *d;
 	
-	for (j = 0; j < MAXARGS; j++)
-	{
-		memset (menu_items + j, 0, sizeof(menu_items[j]));
-	//	memset (menu_items[j].title, 0, MENU_TITLE_BUF_LEN + 1 );
-	}
+	Menu_Item *curr, *next, *sub, *tmp;
+	menus = (Menu_Item *)malloc(sizeof(Menu_Item));
+	tmp = NULL;
+	next = NULL;
+	sub = NULL;
+	curr = menus;
+	set_menuitem(curr);
 	
 	j = -1; //set to 0;
 	n = 0;
+	i = 0;
 
 	while (ReadLine(id, fd, buf, buflen) > 0)//Read a line.
 	{
 		memset(title,0, MENU_TITLE_BUF_LEN + 1 );
-		n++;
 
 		strcpy(buf_bak, buf);//Got a copy of buf.
 		cp = trim(buf);//Trim space
@@ -387,62 +566,69 @@ int menu_list_read(ExecId id, int fd, int flags)
 
 			continue;
 		}
-		
+
+		if (cp[strlen(cp)-1] == '{')
+			i++;
+		else if (cp[strlen(cp)-1] == '}')
+			i--;
+
 		//Check data, looking for menu title.
-		if( GetTitle (cp, title, MENU_TITLE_BUF_LEN ) == 0) 
+		if( GetTitle (cp, title, MENU_TITLE_BUF_LEN ) == 0 && i % 2 == 1)
 		{
-			j++;
-			strncpy (menu_items[j].title, title, MENU_TITLE_BUF_LEN);//storage it.
-			if(menu_items[j].kernel == NULL)
-			{
-				menu_items[j].kernel = malloc (VALUE_LEN + 1);
-				menu_items[j].args = malloc (VALUE_LEN + 1);
-				menu_items[j].initrd = malloc (VALUE_LEN + 1);
-				menu_items[j].root = malloc (VALUE_LEN + 1);
+			next = (Menu_Item *)malloc(sizeof(Menu_Item));
+			if (tmp != NULL) {
+				tmp->Next = next;
+				tmp = NULL;
+			} else {
+				curr->Next = next;
 			}
-			memset (menu_items[j].kernel, 0, VALUE_LEN + 1);
-			memset (menu_items[j].args, 0, VALUE_LEN + 1);
-			memset (menu_items[j].initrd, 0, VALUE_LEN + 1);
-			memset (menu_items[j].root, 0, VALUE_LEN + 1);
+				curr = next;
+			strncpy (next->title, title, MENU_TITLE_BUF_LEN);//storage it.
+			set_menuitem(next);
+			j++;
 			in_menu = 1;
+			issubmenu = 0;
+			continue;
+		}
+		//deal with submenu in grub.cfg
+		if( GetTitle (cp, title, MENU_TITLE_BUF_LEN ) == 1 && i % 2 == 1)
+		{
+			next = (Menu_Item *)malloc(sizeof(Menu_Item));
+			curr->Next = next;
+			curr = next;
+			tmp = next;
+			strncpy (next->title, title, MENU_TITLE_BUF_LEN);//storage it.
+			set_menuitem(next);
+			sub = (Menu_Item *)malloc(sizeof(Menu_Item));
+			curr->Sub = sub;
+			curr = sub;
+			set_menuitem(sub);
+			j++;
+			issubmenu = 1;
+			in_menu = 0;
 			continue;
 		}
 
 		cp = trim(buf_bak);
-		if( in_menu )
-		{	
-			//Read all properties of current menu item.
-			if( GetOption (cp,option,OPTION_LEN,value,VALUE_LEN) == 0 )
-			{
-				if( strcasecmp (option,"kernel") == 0 ) // got kernel property
-				{
-					if( menu_items[j].kernel != NULL && menu_items[j].kernel[0] == '\0') // we only sotr the firs kernel property, drop others.
-						strncpy(menu_items[j].kernel,value,VALUE_LEN);
-				}
-				else if( strcasecmp (option,"args") == 0 )// got kernel arguments property.
-				{
-					if( menu_items[j].args != NULL && menu_items[j].args[0] == '\0')//same as the kernel property.
-						strncpy(menu_items[j].args,value,VALUE_LEN);
-				}
-				else if( strcasecmp (option,"initrd") == 0 )// go initrd kernel arguments property, may be null.
-				{
-					if( menu_items[j].initrd!= NULL && menu_items[j].initrd[0] == '\0')// same as the kernel property.
-						strncpy(menu_items[j].initrd,value,VALUE_LEN);
-				}
-				else if (strcasecmp(option, "root") == 0)
-				{
-					if (menu_items[j].root != NULL && menu_items[j].root[0] == '\0')
-					{
-						strncpy(menu_items[j].root, value, VALUE_LEN);
-					}
-				}
-				//drop other property.
+		if (issubmenu) {
+			if( GetTitle (cp, title, MENU_TITLE_BUF_LEN ) == 0 && i % 2 == 0)  {
+				next = (Menu_Item *)malloc(sizeof(Menu_Item));
+				curr->Next = next;
+				curr = next;
+				strncpy (next->title, title, MENU_TITLE_BUF_LEN);//storage it.
+				set_menuitem(next);
 			}
+			assign_menu(cp,option,value,other,next, root_prefix);
+		}
+
+		if( in_menu )
+		{
+			assign_menu(cp,option,value,other,next, root_prefix);
 		}
 		else // out of menu item.
 		{
 			//Check data, looking for global option.
-			if( GetOption (cp,option,OPTION_LEN,value,VALUE_LEN) == 0 )
+			if( GetOption (cp,option,OPTION_LEN,value,VALUE_LEN, other) == 0 )
 			{
 				set_option_value(option, value);//storage it.
 			}
@@ -668,19 +854,58 @@ int boot_load_from_menu(Menu_Item* pItem)
 	return 0;
 }
 
-int boot_load(int index)
+Menu_Item * locate_menu(Menu_Item *head, int index)
+{
+	if (head == NULL)
+		return NULL;
+	Menu_Item *p = (head)->Next;
+	int i;
+	if (index < 0 || p == NULL)
+		return NULL;
+	for (i = 0; i < index && p != NULL; i++) {
+		p = p->Next;
+	}
+	return p;
+}
+
+void free_menu(Menu_Item *head)
+{
+	if (head == NULL)
+		return NULL;
+	Menu_Item *p;
+	while (head != NULL) {
+		p = head->Next;
+		free(head);
+		head = p;
+	}
+}
+
+int get_menu_nums(Menu_Item *head)
+{
+	int menus_num = 0;
+	if (head == NULL)
+		return 0;
+	Menu_Item *p = (head)->Next;
+	int i;
+	if (p == NULL)
+		return 0;
+	for (menus_num = 0; p != NULL; menus_num++) {
+		p = p->Next;
+	}
+	return menus_num;
+}
+
+int boot_load(Menu_Item *head, int index)
 {
 	char cmd[1025];
 	int is_root = 0;
+	Menu_Item *p = locate_menu(head, index);
 //#define MENU_DEBUG
 #ifdef MENU_DEBUG
 	int stat;
 #endif
 	
-	if( index >= menus_num )
-		return -2;
-
-	return boot_load_from_menu(&menu_items[index]);
+	return boot_load_from_menu(p);
 	
 #if 0
 	if( menu_items[index].kernel == NULL )
@@ -811,10 +1036,12 @@ int load_list_menu(const char* path)
 	return 0;
 }
 
-int do_cmd_boot_load(int boot_id, int device_flag)
+int do_cmd_boot_load(Menu_Item *head, int boot_id, int device_flag)
 {
 	int ret = -1;
 	struct termio sav;
+	int menus_num = get_menu_nums(head);
+
 #if 0
 	if (boot_id == -1 && check_cdrom() && device_flag == IDE)
     {
@@ -835,10 +1062,10 @@ int do_cmd_boot_load(int boot_id, int device_flag)
 
 		if (boot_id < menus_num)
 		{
-			ret = boot_load(boot_id);
+			ret = boot_load(head, boot_id);
 			if (ret <0 )
 			{
-				printf("Configuration failed.\nPress any key to continue ...%d\n", ret);
+				printf("\nConfiguration failed.\nPress any key to continue ...%d\n", ret);
 				getchar();
 			}
 			return ret;

@@ -35,6 +35,7 @@
 
 #include <pmon.h>
 #include <exec.h>
+#include <diskfs.h>
 
 #define MAXARGS 256
 
@@ -57,25 +58,30 @@ typedef struct menu_option
 typedef struct _Menu_Item_
 {
 	char title 	[MENU_TITLE_BUF_LEN + 1];	//Title of menu item, display on screen.
-	char * kernel ;	//kernel file to load.
-	char * args	;	//arguments for kernel.
-	char * initrd ;	//initrd file for kernel, maybe empty.
-	char * root;	//ROOT device from args.
+	char kernel [VALUE_LEN + 1] ;	//kernel file to load.
+	char args	 [VALUE_LEN + 1];	//arguments for kernel.
+	char initrd  [VALUE_LEN + 1];	//initrd file for kernel, maybe empty.
+	char root [VALUE_LEN + 1];	//ROOT device from args.
+	struct _Menu_Item_ * Next;
+	struct _Menu_Item_ * Sub;
 }Menu_Item;
 
 int OpenLoadConfig __P((const char* filename));
 int menu_list_read __P((ExecId, int, int));
 char* trim __P((char *line));
 int GetTitle __P((const char *str,char * title, int title_buf_len));
-int GetOption __P((char *str, char *option, int option_len, char *value, int val_len));
-int boot_load __P((int index));
+int GetOption __P((char *str, char *option, int option_len, char *value, int val_len, char *other));
+int boot_load __P((Menu_Item *head, int index));
 void set_option_value __P((const char* option, const char* value));
 const char* get_option_value __P((const char* option));
 void remove_comment __P((char *str));
+Menu_Item * locate_menu(Menu_Item *head, int index);
+void free_menu(Menu_Item *head);
+int get_menu_nums(Menu_Item *head);
 
 #ifndef __BOOT_CFG_C__
-extern Menu_Item menu_items[MAXARGS];//Storage All menu information.
-extern int menus_num ;
+extern Menu_Item *menus;//Storage All menu information.
+//extern int menus_num ;
 extern MenuOptions menu_options[];
 extern int options_num ;
 #endif 

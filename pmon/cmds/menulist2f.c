@@ -118,17 +118,17 @@ static char* asc_pic[] =
 
 
 static int asc_pic_line = 12;
-#
 #endif
 /*
  * Prototypes
  */
 //static int testgui_cmd __P((int, char **av));
 
-#define FRAME_WIDTH 50
+//#define DEBUG
+#define FRAME_WIDTH 100
 int top_height = 0;
 int vesa_height = 25;
-int frame_height = 12;
+int frame_height = 21;
 int mid_height = 0;
 int bottom_height = 0;
 extern void (*__cprint)(int y, int x,int width,char color, const char *text);
